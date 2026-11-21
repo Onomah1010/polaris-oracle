@@ -42,6 +42,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
   // starting a create — checked+added synchronously with hasOpenMarket in
   // rollFeed, so there's no await between the check and the reservation.
   private readonly rolling = new Set<number>();
+  private paused = false;
 
   constructor(
     private readonly repo: MarketRepository,
@@ -115,6 +116,20 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * 'finalized' event call, so there's exactly one place that can start a
    * creation, not two independently-maintained ones.
    */
+  pause(): void {
+    this.paused = true;
+    this.logger.warn('market factory paused');
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.logger.log('market factory resumed');
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
   private async rollFeed(
     entry: FeedCatalogEntry,
   ): Promise<
@@ -122,6 +137,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     | { status: 'failed'; error: string }
     | { status: 'created'; contractId: string; strikePriceCents: string }
   > {
+    if (this.paused) return { status: 'skipped' };
     if (this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
       return { status: 'skipped' };
     }
