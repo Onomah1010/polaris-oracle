@@ -123,15 +123,18 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     | { status: 'created'; contractId: string; strikePriceCents: string }
   > {
     if (this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
+      this.repo.recordFactoryRun({ feedId: entry.feedId, outcome: 'skipped' });
       return { status: 'skipped' };
     }
     this.rolling.add(entry.feedId);
     try {
       const { contractId, strikePriceCents } = await this.createMarketFor(entry);
+      this.repo.recordFactoryRun({ feedId: entry.feedId, outcome: 'created', contractId });
       return { status: 'created', contractId, strikePriceCents: strikePriceCents.toString() };
     } catch (err) {
       const message = (err as Error).message;
       this.logger.error(`market factory failed for ${entry.symbol}: ${message}`);
+      this.repo.recordFactoryRun({ feedId: entry.feedId, outcome: 'failed', error: message });
       return { status: 'failed', error: message };
     } finally {
       this.rolling.delete(entry.feedId);

@@ -176,6 +176,14 @@ export class AdminController {
   settlementChecks(@Query('limit') limit?: string) {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
   }
+
+  @Get('factory')
+  factory(@Query('limit') limit?: string) {
+    return {
+      recentRuns: this.markets.getRecentFactoryRuns(parseLimit(limit)),
+      lastSuccessPerFeed: this.markets.getLastSuccessPerFeed(),
+    };
+  }
 }
 
 function parseLimit(raw: string | undefined): number {
