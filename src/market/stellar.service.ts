@@ -814,12 +814,12 @@ export class StellarService {
   /**
    * Same deploy-then-initialize CLI shell-out as `deployMarket`, for
    * `polaris-perpetual` — no strike/expiry/grace_period/feed_id (none
-   * exist on this contract), and `price_oracle` is unconditionally `None`:
-   * this backend doesn't wire a real Lazer+Reflector[+RedStone] bundle
-   * into perpetual deployment yet (that's a separate follow-up — see
-   * `polaris-contracts/README.md`'s "A third oracle: RedStone", which is
-   * mainnet-only regardless). `record_price_checkpoint` is consequently
-   * not exposed anywhere in this backend either — see `PerpetualController`.
+   * exist on this contract). `price_oracle` is set from `params.priceOracle`
+   * when provided (a Lazer+Reflector[+RedStone] bundle — see
+   * `polaris-contracts/README.md`'s "A third oracle: RedStone"); it defaults
+   * to `null` (i.e. `price_oracle: None`) when omitted, as before this was
+   * wired. `record_price_checkpoint` is consequently not exposed anywhere in
+   * this backend either — see `PerpetualController`.
    */
   async deployPerpetual(params: CreatePerpetualParams): Promise<{ contractId: string; initTxHash: string }> {
     const network = this.config.get<string>('stellarNetwork')!;
@@ -891,7 +891,7 @@ export class StellarService {
     }
   }
 
-  /** Runs a `stellar` CLI call, retrying past the transient failures in `TRANSIENT_CLI_ERROR`. Anything else fails immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */
+  /** Runs a `stellar` CLI call, retrying past the transient failures identified by `isTransientStellarCliError`. Permanent errors (classified by `PERMANENT_CONTRACT_ERROR`) fail immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */
   private async execStellarCli(
     args: string[],
     attempts = CLI_RETRY_ATTEMPTS,
