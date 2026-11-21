@@ -41,6 +41,27 @@ export interface SettlementCheckRow {
   created_at: number;
 }
 
+export interface SettlementAttemptRow {
+  id: number;
+  market_contract_id: string;
+  path: string;
+  attempt: number;
+  outcome: string;
+  error: string | null;
+  tx_hash: string | null;
+  created_at: number;
+}
+
+export interface AdminActionRow {
+  id: number;
+  action: string;
+  target_contract_id: string | null;
+  params_json: string | null;
+  result: string | null;
+  ip: string | null;
+  created_at: number;
+}
+
 /**
  * A read-side cache for the admin dashboard, not a second source of truth
  * — `MarketRepository`, the vault, and the contracts themselves stay
@@ -102,6 +123,30 @@ export class AdminActivityRepository implements OnModuleDestroy {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_settlement_checks_created_at ON settlement_checks(created_at);
+
+      CREATE TABLE IF NOT EXISTS settlement_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_contract_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        error TEXT,
+        tx_hash TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_market ON settlement_attempts(market_contract_id);
+      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_created_at ON settlement_attempts(created_at);
+
+      CREATE TABLE IF NOT EXISTS admin_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        target_contract_id TEXT,
+        params_json TEXT,
+        result TEXT,
+        ip TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_admin_actions_created_at ON admin_actions(created_at);
     `);
   }
 
@@ -204,6 +249,54 @@ export class AdminActivityRepository implements OnModuleDestroy {
     const counts: Record<SettlementCheckOutcome, number> = { ok: 0, skipped: 0, failed: 0 };
     for (const row of rows) counts[row.outcome] = row.n;
     return counts;
+  }
+
+  recordSettlementAttempt(attempt: {
+    marketContractId: string;
+    path: 'lazer' | 'reflector' | 'cancel' | 'reconcile';
+    attempt: number;
+    outcome: 'success' | 'failure';
+    error?: string;
+    txHash?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO settlement_attempts (market_contract_id, path, attempt, outcome, error, tx_hash, created_at)
+         VALUES (@marketContractId, @path, @attempt, @outcome, @error, @txHash, @createdAt)`,
+      )
+      .run({ ...attempt, error: attempt.error ?? null, txHash: attempt.txHash ?? null, createdAt: Date.now() });
+  }
+
+  getSettlementAttemptsByMarket(marketContractId: string): SettlementAttemptRow[] {
+    return this.db
+      .prepare(`SELECT * FROM settlement_attempts WHERE market_contract_id = ? ORDER BY created_at ASC`)
+      .all(marketContractId) as SettlementAttemptRow[];
+  }
+
+  recordAdminAction(action: {
+    action: string;
+    targetContractId?: string;
+    paramsJson?: string;
+    result?: string;
+    ip?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO admin_actions (action, target_contract_id, params_json, result, ip, created_at)
+         VALUES (@action, @targetContractId, @paramsJson, @result, @ip, @createdAt)`,
+      )
+      .run({
+        action: action.action,
+        targetContractId: action.targetContractId ?? null,
+        paramsJson: action.paramsJson ?? null,
+        result: action.result ?? null,
+        ip: action.ip ?? null,
+        createdAt: Date.now(),
+      });
+  }
+
+  getRecentAdminActions(limit: number): AdminActionRow[] {
+    return this.db.prepare(`SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT ?`).all(limit) as AdminActionRow[];
   }
 
   onModuleDestroy(): void {

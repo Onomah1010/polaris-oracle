@@ -9,39 +9,7 @@ import { fetchHermesPriceCents } from './pyth-price';
 import type { WatchedMarket } from './market.types';
 import type { FeedCatalogEntry } from './market-factory.service';
 
-const SETTLE_TIMEOUT_MS = 30_000;
-const RECONCILE_READ_ATTEMPTS = 3;
 const RECONCILE_READ_RETRY_DELAY_MS = 750;
-/**
- * `settle()` failing once used to go straight to `scheduleCancelFallback`
- * with no retry at all — fine when every failure mode was essentially
- * permanent (bad payload, wrong feed), but the on-chain Reflector
- * cross-check (see `polaris-contracts/README.md`) adds one that plausibly
- * isn't: a single missed 5-minute Reflector update cycle landing badly is
- * likely self-healing within a couple of minutes, and treating it
- * identically to a genuine permanent divergence means refunding a market
- * that would have resolved fine shortly after. A few retries, spaced out,
- * costs little (a real market's grace period is comfortably longer than
- * this whole retry budget) and gives a transient blip room to clear before
- * falling through to the cancel fallback.
- */
-const SETTLE_RETRY_ATTEMPTS = 3;
-const SETTLE_RETRY_DELAY_MS = 75_000;
-/**
- * Confirmed live, twice, this session: a timer scheduled to fire exactly at
- * `expiry`/`grace_period_secs` (computed from this process's wall clock)
- * can beat the chain to it — the contract checks `now >= ...` against the
- * *last-closed ledger's* timestamp, which can lag real wall-clock time by
- * roughly one ledger-close interval (Stellar targets ~5s). A settle/cancel
- * fired right at that boundary gets a spurious `ExpiryNotReached`/
- * `GracePeriodNotElapsed` even though the deadline has "already" passed
- * locally — it self-heals on the next real-world second, but shows up as a
- * market stuck reporting `pending` with a confusing error until something
- * retries it. This buffer only affects *scheduled* fires right at the
- * boundary, not the "already clearly overdue" immediate-fire branches in
- * `arm()`, which don't need it.
- */
-const LEDGER_LAG_BUFFER_MS = 8_000;
 
 /**
  * Owns the in-memory timer state that drives settlement automation. The
@@ -114,7 +82,7 @@ export class MarketService implements OnModuleInit {
     this.clearTimers(m.contractId);
 
     if (now < expiryMs) {
-      const timer = setTimeout(() => void this.trySettle(m), expiryMs - now + LEDGER_LAG_BUFFER_MS);
+      const timer = setTimeout(() => void this.trySettle(m), expiryMs - now + this.config.get<number>('ledgerLagBufferMs')!);
       this.settleTimers.set(m.contractId, timer);
     } else if (now < graceEndMs) {
       void this.trySettle(m);
@@ -125,7 +93,7 @@ export class MarketService implements OnModuleInit {
 
   private scheduleCancelFallback(m: WatchedMarket): void {
     const graceEndMs = m.expiry * 1000 + m.gracePeriodSecs * 1000;
-    const delay = Math.max(0, graceEndMs + LEDGER_LAG_BUFFER_MS - Date.now());
+    const delay = Math.max(0, graceEndMs + this.config.get<number>('ledgerLagBufferMs')! - Date.now());
     const existing = this.cancelTimers.get(m.contractId);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => void this.tryCancel(m), delay);
@@ -165,9 +133,12 @@ export class MarketService implements OnModuleInit {
       }
     }
 
-    for (let attempt = 1; attempt <= SETTLE_RETRY_ATTEMPTS; attempt++) {
+    const settleRetryAttempts = this.config.get<number>('settleRetryAttempts')!;
+    const settleTimeoutMs = this.config.get<number>('settleTimeoutMs')!;
+    const settleRetryDelayMs = this.config.get<number>('settleRetryDelayMs')!;
+    for (let attempt = 1; attempt <= settleRetryAttempts; attempt++) {
       try {
-        const { payload, priceCents: lazerPriceCents } = await this.oracle.waitForUpdate(m.feedId, SETTLE_TIMEOUT_MS);
+        const { payload, priceCents: lazerPriceCents } = await this.oracle.waitForUpdate(m.feedId, settleTimeoutMs);
         await this.crossCheckAgainstHermes(m, lazerPriceCents);
         const txHash = await this.stellar.settle(m.contractId, payload);
         this.persist(m, { status: 'settled', settleTxHash: txHash, lastError: undefined });
@@ -176,14 +147,14 @@ export class MarketService implements OnModuleInit {
       } catch (err) {
         const message = (err as Error).message;
         if (await this.reconcileWithChain(m)) return;
-        if (attempt < SETTLE_RETRY_ATTEMPTS) {
+        if (attempt < settleRetryAttempts) {
           this.logger.warn(
-            `settle attempt ${attempt}/${SETTLE_RETRY_ATTEMPTS} failed for ${m.contractId}, retrying in ${SETTLE_RETRY_DELAY_MS / 1000}s: ${message}`,
+            `settle attempt ${attempt}/${settleRetryAttempts} failed for ${m.contractId}, retrying in ${settleRetryDelayMs / 1000}s: ${message}`,
           );
-          await new Promise((resolve) => setTimeout(resolve, SETTLE_RETRY_DELAY_MS));
+          await new Promise((resolve) => setTimeout(resolve, settleRetryDelayMs));
           continue;
         }
-        this.logger.error(`settle failed for ${m.contractId} after ${SETTLE_RETRY_ATTEMPTS} attempts: ${message}`);
+        this.logger.error(`settle failed for ${m.contractId} after ${settleRetryAttempts} attempts: ${message}`);
         this.persist(m, { status: 'pending', lastError: message });
         this.scheduleCancelFallback(m);
       }
@@ -327,20 +298,21 @@ export class MarketService implements OnModuleInit {
   private async reconcileWithChain(m: WatchedMarket): Promise<boolean> {
     let state;
     let lastReadError: unknown;
-    for (let attempt = 1; attempt <= RECONCILE_READ_ATTEMPTS; attempt++) {
+    const reconcileReadAttempts = this.config.get<number>('reconcileReadAttempts')!;
+    for (let attempt = 1; attempt <= reconcileReadAttempts; attempt++) {
       try {
         state = await this.stellar.getMarketState(m.contractId);
         break;
       } catch (err) {
         lastReadError = err;
-        if (attempt < RECONCILE_READ_ATTEMPTS) {
+        if (attempt < reconcileReadAttempts) {
           await new Promise((resolve) => setTimeout(resolve, RECONCILE_READ_RETRY_DELAY_MS));
         }
       }
     }
     if (!state) {
       this.logger.warn(
-        `reconcileWithChain: couldn't read ${m.contractId}'s on-chain state after ${RECONCILE_READ_ATTEMPTS} attempts (${(lastReadError as Error)?.message}) — can't tell if it's already finalized`,
+        `reconcileWithChain: couldn't read ${m.contractId}'s on-chain state after ${reconcileReadAttempts} attempts (${(lastReadError as Error)?.message}) — can't tell if it's already finalized`,
       );
       return false; // can't tell — fall through to the normal failure path
     }

@@ -92,6 +92,7 @@ export class PerpetualController {
     });
 
     const watched = this.perpetuals.watch(contractId);
+    this.activity.recordAdminAction({ action: 'perpetual/create', targetContractId: contractId, paramsJson: JSON.stringify(dto), result: 'ok' });
     return { ...watched, initTxHash };
   }
 
@@ -189,6 +190,7 @@ export class PerpetualController {
     }
     await this.stellar.refreshMockRedstonePrice(mockRedstoneContract, priceCents);
     const txHash = await this.stellar.recordPriceCheckpoint(id, payload);
+    this.activity.recordAdminAction({ action: 'perpetual/checkpoint', targetContractId: id, result: txHash });
     return { txHash, ...(await this.stellar.getPerpetualState(id)) };
   }
 
@@ -206,6 +208,7 @@ export class PerpetualController {
     // own function kind rather than folded into fee-revenue accounting —
     // see AdminController.feeRevenue()'s doc comment on why only
     // buy/sell ever pay a fee.
+    this.activity.recordAdminAction({ action: 'perpetual/terminate', targetContractId: id, result: p?.terminateTxHash ?? 'pending' });
     if (p?.terminateTxHash) {
       try {
         this.activity.recordWalletAction({

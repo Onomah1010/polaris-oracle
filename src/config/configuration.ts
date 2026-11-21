@@ -27,6 +27,16 @@ export interface AppConfig {
   /** IP-keyed limit on POST /wallets/deploy — mitigates, doesn't close, the known unauthenticated-endpoint gap (see WalletDeployRateLimiter). */
   walletDeployMaxPerHour: number;
   settleFreshnessWindowSecs: number;
+  /** Max ms to wait for a Lazer price update before timing out a settle attempt (`SETTLE_TIMEOUT_MS`, default 30 000). */
+  settleTimeoutMs: number;
+  /** Max settle/cancel attempts before giving up (`SETTLE_RETRY_ATTEMPTS`, default 3). */
+  settleRetryAttempts: number;
+  /** Ms to wait between consecutive settle retry attempts (`SETTLE_RETRY_DELAY_MS`, default 75 000). Must be less than `marketFactoryGracePeriodSecs * 1000`. */
+  settleRetryDelayMs: number;
+  /** Max attempts to read on-chain state during reconciliation (`RECONCILE_READ_ATTEMPTS`, default 3). */
+  reconcileReadAttempts: number;
+  /** Extra ms of buffer after market expiry before attempting settlement — absorbs ledger-close lag (`LEDGER_LAG_BUFFER_MS`, default 8 000). */
+  ledgerLagBufferMs: number;
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
@@ -220,6 +230,11 @@ export default (): AppConfig => ({
   emailWalletOrigin: process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000',
   vaultContract: process.env.VAULT_CONTRACT,
   feedCatalog: parseFeedCatalog(process.env.FEED_CATALOG),
+  settleTimeoutMs: Number(process.env.SETTLE_TIMEOUT_MS ?? 30_000),
+  settleRetryAttempts: Number(process.env.SETTLE_RETRY_ATTEMPTS ?? 3),
+  settleRetryDelayMs: Number(process.env.SETTLE_RETRY_DELAY_MS ?? 75_000),
+  reconcileReadAttempts: Number(process.env.RECONCILE_READ_ATTEMPTS ?? 3),
+  ledgerLagBufferMs: Number(process.env.LEDGER_LAG_BUFFER_MS ?? 8_000),
   settleOracleToleranceBps: Number(process.env.SETTLE_ORACLE_TOLERANCE_BPS ?? 150),
   reflectorContract: process.env.REFLECTOR_CONTRACT,
   reflectorAsset: process.env.REFLECTOR_ASSET ?? 'XLM',

@@ -53,6 +53,12 @@ export class EmailAuthRepository {
         encrypted_private_key TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS email_key_exports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_key_exports_email ON email_key_exports(email);
     `);
   }
 
@@ -102,5 +108,16 @@ export class EmailAuthRepository {
          VALUES (@email, @address, @publicKeyHex, @encryptedPrivateKey, @createdAt)`,
       )
       .run({ email, address, publicKeyHex, encryptedPrivateKey, createdAt: Date.now() });
+  }
+
+  /** Records an audit entry for each key export. */
+  recordKeyExport(email: string): void {
+    this.db.prepare('INSERT INTO email_key_exports (email, created_at) VALUES (?, ?)').run(email, Date.now());
+  }
+
+  /** Returns the number of key exports for `email` in the last hour — callers enforce a rate limit. */
+  countRecentKeyExports(email: string, windowMs = 60 * 60 * 1000): number {
+    const since = Date.now() - windowMs;
+    return (this.db.prepare('SELECT COUNT(*) as n FROM email_key_exports WHERE email = ? AND created_at >= ?').get(email, since) as { n: number }).n;
   }
 }

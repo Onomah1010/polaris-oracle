@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminGuard } from './admin.guard';
 import { MarketRepository } from './market.repository';
@@ -175,6 +175,16 @@ export class AdminController {
   @Get('settlement-checks')
   settlementChecks(@Query('limit') limit?: string) {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
+  }
+
+  @Get('markets/:id/attempts')
+  settlementAttempts(@Param('id') id: string) {
+    return { attempts: this.activity.getSettlementAttemptsByMarket(id) };
+  }
+
+  @Get('actions')
+  adminActions(@Query('limit') limit?: string) {
+    return { actions: this.activity.getRecentAdminActions(parseLimit(limit)) };
   }
 }
 
