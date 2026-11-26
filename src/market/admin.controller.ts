@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminGuard } from './admin.guard';
 import { MarketRepository } from './market.repository';
@@ -200,30 +200,14 @@ export class AdminController {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
   }
 
-  /**
-   * Surfaces stuck markets (#166): `pending` markets with a `lastError` and
-   * how long ago they last changed. `overview()` shows "pending: N" but
-   * gives no way to see which ones are stuck, why, or for how long — an
-   * operator cannot act on that alone.
-   *
-   * "Age" is computed from `updatedAt` (seconds since epoch stored in SQLite
-   * INTEGER) so it stays meaningful even after a process restart resets any
-   * in-memory timer state.
-   */
-  @Get('pending-markets')
-  pendingMarkets() {
-    const nowSecs = Math.floor(Date.now() / 1000);
-    const pending = this.markets
-      .getAll()
-      .filter((m) => m.status === 'pending')
-      .map((m) => ({
-        contractId: m.contractId,
-        lastError: m.lastError ?? null,
-        ageSecs: nowSecs - m.updatedAt,
-        updatedAt: m.updatedAt,
-      }))
-      .sort((a, b) => b.ageSecs - a.ageSecs);
-    return { total: pending.length, markets: pending };
+  @Get('markets/:id/attempts')
+  settlementAttempts(@Param('id') id: string) {
+    return { attempts: this.activity.getSettlementAttemptsByMarket(id) };
+  }
+
+  @Get('actions')
+  adminActions(@Query('limit') limit?: string) {
+    return { actions: this.activity.getRecentAdminActions(parseLimit(limit)) };
   }
 }
 

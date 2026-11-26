@@ -22,6 +22,7 @@ import { CreateMarketDto } from './dto/create-market.dto';
 import { WatchMarketDto } from './dto/watch-market.dto';
 import { FaucetDto } from './dto/faucet.dto';
 import { OddsSnapshotRepository } from './odds-snapshot.repository';
+import { AdminActivityRepository } from './admin-activity.repository';
 
 @Controller('markets')
 export class MarketController {
@@ -32,6 +33,7 @@ export class MarketController {
     private readonly faucet: FaucetService,
     private readonly config: ConfigService,
     private readonly oddsSnapshots: OddsSnapshotRepository,
+    private readonly activity: AdminActivityRepository,
   ) {}
 
   private validateId(id: string) {
@@ -148,6 +150,13 @@ export class MarketController {
       feedId,
     });
 
+    this.activity.recordAdminAction({
+      action: 'create',
+      targetContractId: contractId,
+      paramsJson: JSON.stringify(dto),
+      result: 'ok',
+    });
+
     return { ...watched, initTxHash };
   }
 
@@ -155,20 +164,24 @@ export class MarketController {
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async runFactory() {
-    return this.factory.run();
+    const result = await this.factory.run();
+    this.activity.recordAdminAction({ action: 'factory/run', result: 'ok' });
+    return result;
   }
 
   @Post('watch')
   @UseGuards(AdminGuard)
   async watch(@Body() dto: WatchMarketDto) {
     const state = await this.stellar.getMarketState(dto.contractId);
-    return this.markets.watch({
+    const watched = this.markets.watch({
       contractId: dto.contractId,
       strikePriceCents: state.strikePrice,
       expiry: Number(state.expiry),
       gracePeriodSecs: Number(state.gracePeriod),
       feedId: state.feedId,
     });
+    this.activity.recordAdminAction({ action: 'watch', targetContractId: dto.contractId, result: 'ok' });
+    return watched;
   }
 
   @Post(':id/settle')
@@ -177,6 +190,7 @@ export class MarketController {
   async settle(@Param('id') id: string) {
     this.validateId(id);
     await this.markets.triggerSettle(id);
+    this.activity.recordAdminAction({ action: 'settle', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
   }
 
@@ -186,6 +200,7 @@ export class MarketController {
   async cancel(@Param('id') id: string) {
     this.validateId(id);
     await this.markets.triggerCancel(id);
+    this.activity.recordAdminAction({ action: 'cancel', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
   }
 }

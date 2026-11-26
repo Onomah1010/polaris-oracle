@@ -102,6 +102,29 @@ export class EmailAuthController {
     return { txHash: result.txHash };
   }
 
+  /**
+   * POST /email/export-key — re-authenticated custodial key export (issue #183).
+   *
+   * Returns the secp256r1 private key as a hex-encoded SEC1 DER bytes so the
+   * user can import it into any P-256-capable self-custody wallet.
+   * Rate-limited to 3 requests per hour; every export is audit-logged.
+   */
+  @Post('export-key')
+  @HttpCode(200)
+  exportKey(@Req() req: Request) {
+    const session = this.emailAuth.verifySession(readCookie(req, SESSION_COOKIE));
+    if (!session) {
+      throw new UnauthorizedException('not signed in');
+    }
+    let result: { privateKeyHex: string; walletAddress: string };
+    try {
+      result = this.emailAuth.exportPrivateKey(session.email);
+    } catch (err) {
+      throw new BadRequestException(messageOf(err));
+    }
+    return result;
+  }
+
   private cookieOptions() {
     const isProd = process.env.NODE_ENV === 'production';
     return {

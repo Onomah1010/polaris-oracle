@@ -154,15 +154,31 @@ export class EmailAuthService {
   }
 
   /**
-   * Returns the custodial Stellar wallet address for `email`, deploying a new
-   * secp256r1 smart-wallet via `StellarService.deployWallet` on first call.
-   * The generated private key is encrypted at rest (`emailWalletEncKeyHex`)
-   * before being stored; the plaintext never leaves memory. The deployed wallet
-   * uses the same `smart-wallet-factory` path as a passkey wallet, so it is
-   * indistinguishable on-chain. Best-effort Friendbot funding is attempted for
-   * new wallets so the first trade doesn't fail on insufficient balance —
-   * funding errors are logged but never thrown.
+   * Re-authenticated key export — returns the custodial private key so the
+   * user can import it into a self-custody wallet (issue #183).
+   *
+   * Requires a fresh OTP verification first (the caller must have just
+   * called `verifyCode` and hold a valid session). The key is returned as a
+   * hex-encoded SEC1 DER private key (the same format `generateP256Keypair`
+   * produces) so it can be imported into any secp256r1-capable wallet.
+   *
+   * Rate-limiting: at most 3 exports per hour per email (enforced in the
+   * repository layer). Each export is audit-logged.
    */
+  exportPrivateKey(email: string): { privateKeyHex: string; walletAddress: string } {
+    const walletRow = this.repo.getWallet(email);
+    if (!walletRow) {
+      throw new EmailAuthError('No wallet found for this email — sign in first.');
+    }
+    const recentExports = this.repo.countRecentKeyExports(email);
+    if (recentExports >= 3) {
+      throw new EmailAuthError('Too many key export requests — try again later.');
+    }
+    const privateKey = decryptAtRest(walletRow.encrypted_private_key, this.config.get<string>('emailWalletEncKeyHex')!);
+    this.repo.recordKeyExport(email);
+    return { privateKeyHex: privateKey.toString('hex'), walletAddress: walletRow.address };
+  }
+
   private async getOrCreateWallet(email: string): Promise<string> {
     const existing = this.repo.getWallet(email);
     if (existing) return existing.address;
