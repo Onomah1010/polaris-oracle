@@ -139,7 +139,10 @@ export class AdminController {
   wallets() {
     const passkeyAddresses = this.activity.getDistinctWalletAddresses();
     const emailWallets = this.emailWallets.getAllWallets().map((w) => ({
-      email: w.email,
+      // Masked to `u***@domain` — the full address list is one shared-secret
+      // header away (no per-admin lockout), so we return only enough to
+      // identify the account visually without exposing a full email dump.
+      email: maskEmail(w.email),
       address: w.address,
       createdAt: w.created_at,
       // Deliberately not returning encrypted_private_key/public_key_hex —
@@ -214,4 +217,13 @@ export class AdminController {
 function parseLimit(raw: string | undefined): number {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 && n <= 500 ? n : DEFAULT_LIST_LIMIT;
+}
+
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  const visible = local.slice(0, 1);
+  return `${visible}***${domain}`;
 }
