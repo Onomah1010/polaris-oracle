@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Keypair, rpc, type Transaction } from '@stellar/stellar-sdk';
 import { contract as StellarContract } from '@stellar/stellar-sdk';
-import { execFile, spawn } from 'node:child_process';
+import { xdr } from '@stellar/stellar-sdk';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { marketSpec, perpetualSpec, factorySpec, vaultSpec, mockRedstoneSpec } from './contracts';
 import type { OnChainMarket } from './market.types';
@@ -11,17 +12,17 @@ import { redactSecrets, sanitizeCliError, extractContractId, parseReflectorPrice
 
 const execFileAsync = promisify(execFile);
 
-/** Minimal surface of a SEP-41 contract client fetched via `Client.from` for a SAC — only the `balance` method is needed here. */
-interface SacBalanceClient {
-  balance(args: { id: string }): Promise<StellarContract.AssembledTransaction<bigint>>;
-}
+/** Hard cap on a single `stellar` CLI process; a hung network read is killed instead of blocking forever. */
+/** Bounded poll for a freshly deployed contract to become visible before `initialize`. */
+const CONTRACT_VISIBLE_TIMEOUT_MS = 30_000;
+const CONTRACT_VISIBLE_POLL_MS = 1000;
+
+const CLI_TIMEOUT_MS = Number(process.env.STELLAR_CLI_TIMEOUT_MS) || 120_000;
 
 const CLI_RETRY_ATTEMPTS = 3;
 const CLI_RETRY_DELAY_MS = 2000;
 const RPC_RETRY_ATTEMPTS = 3;
 const RPC_RETRY_DELAY_MS = 1000;
-/** Gives the deployed contract a moment to propagate before `initialize` looks for it — see `deployMarket`. */
-const DEPLOY_TO_INIT_DELAY_MS = 1500;
 
 /**
  * `stellar` CLI failures seen live on testnet, from back-to-back calls
@@ -729,44 +730,98 @@ export class StellarService {
     return this.deployAndInitialize(
       'market',
       'wasm/polaris_market.wasm',
-      [
-        'initialize',
-        '--admin',
-        this.deployerPublicKey,
-        '--collateral',
-        params.collateralAsset,
-        '--strike_price',
-        params.strikePriceCents.toString(),
-        '--expiry',
-        params.expiry.toString(),
-        '--grace_period',
-        params.gracePeriodSecs.toString(),
-        '--lazer_contract',
-        params.lazerContract,
-        '--feed_id',
-        params.feedId.toString(),
-        '--base_fee_bps',
-        params.baseFeeBps.toString(),
-        '--min_fee_bps',
-        params.minFeeBps.toString(),
-        '--treasury',
-        params.treasury,
-        '--initial_liquidity',
-        params.initialLiquidityStroops.toString(),
-        '--reflector',
-        buildReflectorConfigArg(params),
-        // `initialize`'s 13th param, `Option<OracleFeedConfig>` — RedStone
-        // has no testnet deployment (see polaris-contracts/README.md's "A
-        // third oracle: RedStone"), so this stays unconditionally `None`.
-        // `null` confirmed live as the CLI's encoding for an omitted
-        // optional struct arg (its own error message for a missing field
-        // elsewhere literally suggests this: "For optional values, use null
-        // for none or the expected value type").
-        '--redstone',
-        'null',
-      ],
-      (id) => this.getMarketState(id),
-    );
+      '--source',
+      this.deployerCliIdentity,
+      '--network',
+      network,
+      '--rpc-url',
+      this.rpcUrl,
+      '--network-passphrase',
+      this.networkPassphrase,
+    ]);
+    const contractId = extractContractId(deploy.stdout);
+    this.logger.log(`deployed market contract ${contractId}`);
+
+    // The freshly deployed contract isn't always visible to the RPC node
+    // `initialize` immediately queries next — a bare wait here cuts down how
+    // often the retry below is actually needed, rather than relying on it
+    // to paper over an avoidable race every time.
+    await this.waitForContractVisible(contractId);
+
+    const initArgs = [
+      'contract',
+      'invoke',
+      '--id',
+      contractId,
+      '--source',
+      this.deployerCliIdentity,
+      '--network',
+      network,
+      '--rpc-url',
+      this.rpcUrl,
+      '--network-passphrase',
+      this.networkPassphrase,
+      '--',
+      'initialize',
+      '--admin',
+      this.deployerPublicKey,
+      '--collateral',
+      params.collateralAsset,
+      '--strike_price',
+      params.strikePriceCents.toString(),
+      '--expiry',
+      params.expiry.toString(),
+      '--grace_period',
+      params.gracePeriodSecs.toString(),
+      '--lazer_contract',
+      params.lazerContract,
+      '--feed_id',
+      params.feedId.toString(),
+      '--base_fee_bps',
+      params.baseFeeBps.toString(),
+      '--min_fee_bps',
+      params.minFeeBps.toString(),
+      '--treasury',
+      params.treasury,
+      '--initial_liquidity',
+      params.initialLiquidityStroops.toString(),
+      '--reflector',
+      buildReflectorConfigArg(params),
+      // `initialize`'s 13th param, `Option<OracleFeedConfig>` — RedStone
+      // has no testnet deployment (see polaris-contracts/README.md's "A
+      // third oracle: RedStone"), so this stays unconditionally `None`.
+      // `null` confirmed live as the CLI's encoding for an omitted
+      // optional struct arg (its own error message for a missing field
+      // elsewhere literally suggests this: "For optional values, use null
+      // for none or the expected value type").
+      '--redstone',
+      'null',
+    ];
+
+    try {
+      const invoke = await this.execStellarCli(initArgs);
+      return { contractId, initTxHash: invoke.stdout.trim() };
+    } catch (err) {
+      // Confirmed live: the CLI's own submission can succeed on-chain while
+      // still reporting a client-side failure (its result-polling hit a
+      // hiccup and, per the doc comment on PERMANENT_CONTRACT_ERROR, a
+      // second internal attempt then simulates against the now-initialized
+      // contract and reports the *simulation's* rejection instead) — the
+      // exact same "crash between on-chain success and this backend
+      // recording it" shape as MarketService.reconcileWithChain, just for
+      // deploy instead of settle/cancel. Without this check, a genuinely
+      // successful deploy would be reported as a failure and — for
+      // MarketFactoryService specifically — the vault capital that already
+      // funded this real, open market would never get an entry in
+      // MarketRepository, so it would never get settlement timers armed.
+      if (!StellarService.isAlreadyInitializedError(err)) throw err; // not AlreadyInitialized (#2)
+      const state = await this.getMarketState(contractId);
+      if (state.status !== 'Open') throw err; // genuinely uninitialized/broken — the AlreadyInitialized report was accurate, not a false negative
+      this.logger.warn(
+        `initialize on ${contractId} reported AlreadyInitialized but the contract is Open on-chain — treating as already succeeded, not a failure (no initTxHash available for this reconciled path)`,
+      );
+      return { contractId, initTxHash: '' };
+    }
   }
 
   /**
@@ -870,11 +925,7 @@ export class StellarService {
     const contractId = deploy.stdout.trim().split('\n').pop()!.trim();
     this.logger.log(`deployed ${label} contract ${contractId}`);
 
-    // The freshly deployed contract isn't always visible to the RPC node
-    // `initialize` immediately queries next — a bare wait here cuts down how
-    // often the retry below is actually needed, rather than relying on it
-    // to paper over an avoidable race every time.
-    await sleep(DEPLOY_TO_INIT_DELAY_MS);
+    await this.waitForContractVisible(contractId);
 
     const invokeArgs = [
       'contract',
@@ -939,11 +990,15 @@ export class StellarService {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        return await execFileAsync('stellar', args);
+        return await execFileAsync('stellar', args, { timeout: CLI_TIMEOUT_MS, killSignal: 'SIGKILL' });
       } catch (err) {
         lastErr = err;
-        const message = redactSecrets((err as { stderr?: string; message: string }).stderr ?? (err as Error).message);
-        if (attempt === attempts || !isTransientStellarCliError(message)) throw sanitizeCliError(err);
+        const timedOut = (err as { killed?: boolean }).killed === true;
+        const message = timedOut
+          ? `stellar CLI timed out after ${CLI_TIMEOUT_MS}ms`
+          : ((err as { stderr?: string; message: string }).stderr ?? (err as Error).message);
+        if (timedOut && attempt === attempts) throw new Error(message);
+        if (attempt === attempts || (!timedOut && !isTransientStellarCliError(message))) throw err;
         this.logger.warn(
           `stellar CLI call failed transiently (attempt ${attempt}/${attempts}), retrying: ${summaryLine(message)}`,
         );
@@ -951,6 +1006,25 @@ export class StellarService {
       }
     }
     throw lastErr;
+  }
+
+  /** Polls the RPC for the contract instance entry until visible (up to 30s), so `initialize` doesn't race deploy propagation. */
+  private async waitForContractVisible(contractId: string): Promise<void> {
+    const deadline = Date.now() + CONTRACT_VISIBLE_TIMEOUT_MS;
+    for (;;) {
+      try {
+        await this.server.getContractData(contractId, xdr.ScVal.scvLedgerKeyContractInstance());
+        return;
+      } catch {
+        // not found yet (or transient RPC error): keep polling until the deadline
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `deployed contract ${contractId} not visible on the RPC after ${CONTRACT_VISIBLE_TIMEOUT_MS}ms; it is deployed but uninitialized and must be recovered manually`,
+        );
+      }
+      await sleep(CONTRACT_VISIBLE_POLL_MS);
+    }
   }
 }
 

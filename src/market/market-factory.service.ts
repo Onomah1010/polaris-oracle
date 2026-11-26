@@ -42,6 +42,9 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
   // starting a create — checked+added synchronously with hasOpenMarket in
   // rollFeed, so there's no await between the check and the reservation.
   private readonly rolling = new Set<number>();
+  // Deployed markets whose watch() threw (e.g. SQLITE_BUSY): the contract is
+  // live and funded, so the next sweep re-tracks it instead of deploying another.
+  private readonly orphans = new Map<number, Parameters<MarketService['watch']>[0]>();
 
   constructor(
     private readonly repo: MarketRepository,
@@ -128,6 +131,13 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     }
     this.rolling.add(entry.feedId);
     try {
+      const orphan = this.orphans.get(entry.feedId);
+      if (orphan) {
+        this.markets.watch(orphan);
+        this.orphans.delete(entry.feedId);
+        this.logger.warn(`re-tracked orphaned market ${orphan.contractId} for ${entry.symbol}`);
+        return { status: 'created', contractId: orphan.contractId, strikePriceCents: orphan.strikePriceCents };
+      }
       const { contractId, strikePriceCents } = await this.createMarketFor(entry);
       return { status: 'created', contractId, strikePriceCents: strikePriceCents.toString() };
     } catch (err) {
@@ -162,9 +172,6 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
-    const now = Math.floor(Date.now() / 1000);
-    const expiry = now + this.config.get<number>('marketFactoryExpirySecs')!;
     const gracePeriodSecs = this.config.get<number>('marketFactoryGracePeriodSecs')!;
     const initialLiquidityStroops = BigInt(this.config.get<string>('marketFactoryInitialLiquidityStroops')!);
 
@@ -173,6 +180,11 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     // deployMarket never runs, so there's no partially-funded market left
     // behind. See the module doc: every entry fails independently.
     const withdrawTxHash = await this.stellar.vaultWithdraw(vaultContract, initialLiquidityStroops);
+
+    // Strike and expiry are taken right before deploy, after the withdraw
+    // round trip, so neither is stale by the time the market opens.
+    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
+    const expiry = Math.floor(Date.now() / 1000) + this.config.get<number>('marketFactoryExpirySecs')!;
 
     const { contractId } = await this.stellar.deployMarket({
       strikePriceCents,
@@ -194,13 +206,22 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       reflectorToleranceBps: this.config.get<number>('reflectorToleranceBps')!,
     });
 
-    this.markets.watch({
+    const watched = {
       contractId,
       strikePriceCents: strikePriceCents.toString(),
       expiry,
       gracePeriodSecs,
       feedId: entry.feedId,
-    });
+    };
+    try {
+      this.markets.watch(watched);
+    } catch (err) {
+      this.orphans.set(entry.feedId, watched);
+      this.logger.error(
+        `deployed market ${contractId} for feed ${entry.feedId} but watch() failed; will retry next sweep: ${(err as Error).message}`,
+      );
+      throw err;
+    }
 
     // Best-effort admin-dashboard logging, once the market that withdrawal
     // actually funded is known — see AdminActivityRepository's doc comment:
