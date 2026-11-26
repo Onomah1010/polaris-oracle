@@ -46,7 +46,14 @@ export interface AppConfig {
   emailCodeTtlSecs: number;
   emailCodeMaxAttempts: number;
   emailCodeResendCooldownSecs: number;
-  /** Only used to fill in a WebAuthn-shaped `client_data_json`/`rpIdHash` for custodial signatures — never validated on-chain (see `email-wallet-signer.ts`), so these don't need to match the frontend exactly. */
+  /**
+   * Embedded verbatim in the `client_data_json` the custodial signer produces.
+   * The smart-wallet contract validates `origin` against the value pinned in
+   * the factory at `initialize()` time — a mismatch causes every email-wallet
+   * trade to fail with `OriginMismatch`.  These **must** match the frontend
+   * origin exactly in production; the localhost defaults are safe only for
+   * local development.
+   */
   emailWalletRpId: string;
   emailWalletOrigin: string;
   vaultContract: string | undefined;
