@@ -44,11 +44,30 @@ export class MarketController {
 
 
   @Get()
-  list(@Query('feedId') feedId?: string) {
-    if (feedId === undefined) return this.markets.list();
-    const parsed = Number(feedId);
-    if (Number.isNaN(parsed)) throw new BadRequestException('feedId must be a number');
-    return this.markets.list(parsed);
+  list(
+    @Query('feedId') feedId?: string,
+    @Query('status') statusParam?: string,
+    @Query('limit') limitParam?: string,
+    @Query('before') before?: string,
+  ) {
+    // Legacy feedId path — kept for backward compatibility.
+    if (feedId !== undefined) {
+      const parsed = Number(feedId);
+      if (Number.isNaN(parsed)) throw new BadRequestException('feedId must be a number');
+      return this.markets.list(parsed);
+    }
+
+    // New paginated + filtered path.
+    if (statusParam !== undefined || limitParam !== undefined || before !== undefined) {
+      const status = statusParam ? statusParam.split(',').map((s) => s.trim()) : undefined;
+      const limit = limitParam !== undefined ? Number(limitParam) : 50;
+      if (Number.isNaN(limit) || limit < 1 || limit > 500) {
+        throw new BadRequestException('limit must be a number between 1 and 500');
+      }
+      return this.markets.listPaginated({ status, limit, before });
+    }
+
+    return this.markets.list();
   }
 
   @Get(':id')
@@ -202,5 +221,49 @@ export class MarketController {
     await this.markets.triggerCancel(id);
     this.activity.recordAdminAction({ action: 'cancel', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
+  }
+
+  // ── #179: factory pause / resume ──────────────────────────────────────────
+
+  @Post('factory/pause')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  pauseFactory() {
+    this.factory.pause();
+    return { paused: true };
+  }
+
+  @Post('factory/resume')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  resumeFactory() {
+    this.factory.resume();
+    return { paused: false };
+  }
+
+  // ── #180: bulk pending retry ───────────────────────────────────────────────
+
+  @Post('pending/retry')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  async retryPending() {
+    const pending = this.markets.listPaginated({ status: ['pending'], limit: 500 });
+    const results: { contractId: string; outcome: string; error?: string }[] = [];
+    const now = Date.now();
+    for (const m of pending) {
+      try {
+        const pastGrace = (m.expiry + m.gracePeriodSecs) * 1000 < now;
+        if (pastGrace) {
+          await this.markets.triggerCancel(m.contractId);
+          results.push({ contractId: m.contractId, outcome: 'cancel' });
+        } else {
+          await this.markets.triggerSettle(m.contractId);
+          results.push({ contractId: m.contractId, outcome: 'settle' });
+        }
+      } catch (err) {
+        results.push({ contractId: m.contractId, outcome: 'error', error: (err as Error).message });
+      }
+    }
+    return { processed: results.length, results };
   }
 }

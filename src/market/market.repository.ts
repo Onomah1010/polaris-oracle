@@ -63,6 +63,28 @@ export class MarketRepository {
     return rows.map(rowToMarket);
   }
 
+  list(opts: { status?: string[]; limit?: number; before?: string }): WatchedMarket[] {
+    const { status, limit = 50, before } = opts;
+    const cap = Math.min(limit, 500);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (status && status.length > 0) {
+      conditions.push(`status IN (${status.map(() => '?').join(',')})`);
+      params.push(...status);
+    }
+    if (before) {
+      conditions.push(`created_at < ?`);
+      params.push(before);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = this.db
+      .prepare(`SELECT * FROM markets ${where} ORDER BY created_at DESC LIMIT ?`)
+      .all(...params, cap) as any[];
+    return rows.map(rowToMarket);
+  }
+
   getById(contractId: string): WatchedMarket | undefined {
     const row = this.db
       .prepare(`SELECT * FROM markets WHERE contract_id = ?`)

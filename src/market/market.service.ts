@@ -76,6 +76,10 @@ export class MarketService implements OnModuleInit {
     return feedId === undefined ? this.repo.getAll() : this.repo.getByFeedId(feedId);
   }
 
+  listPaginated(opts: { status?: string[]; limit?: number; before?: string }): WatchedMarket[] {
+    return this.repo.list(opts);
+  }
+
   get(contractId: string): WatchedMarket | undefined {
     return this.repo.getById(contractId);
   }
