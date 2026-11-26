@@ -203,14 +203,12 @@ export class AdminController {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
   }
 
-  @Get('markets/:id/attempts')
-  settlementAttempts(@Param('id') id: string) {
-    return { attempts: this.activity.getSettlementAttemptsByMarket(id) };
-  }
-
-  @Get('actions')
-  adminActions(@Query('limit') limit?: string) {
-    return { actions: this.activity.getRecentAdminActions(parseLimit(limit)) };
+  @Get('factory')
+  factory(@Query('limit') limit?: string) {
+    return {
+      recentRuns: this.markets.getRecentFactoryRuns(parseLimit(limit)),
+      lastSuccessPerFeed: this.markets.getLastSuccessPerFeed(),
+    };
   }
 }
 

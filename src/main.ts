@@ -4,21 +4,11 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
+import { AppLoggerService } from './logger.service';
 import { resolveCorsOrigins } from './cors-origins';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  const logger = new Logger('HTTP');
-
-  // Log every request: method, path, status code, and latency (#160).
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    const start = Date.now();
-    res.on('finish', () => {
-      logger.log(`${req.method} ${req.path} ${res.statusCode} ${Date.now() - start}ms`);
-    });
-    next();
-  });
-
+  const app = await NestFactory.create(AppModule, { logger: new AppLoggerService() });
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );

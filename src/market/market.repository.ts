@@ -23,6 +23,15 @@ export class MarketRepository {
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS factory_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        feed_id INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        contract_id TEXT,
+        error TEXT,
+        at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS factory_runs_feed_id ON factory_runs (feed_id, at DESC);
     `);
     runMigrations(this.db);
   }
@@ -66,6 +75,52 @@ export class MarketRepository {
       .prepare(`SELECT * FROM markets WHERE feed_id = ? ORDER BY created_at DESC`)
       .all(feedId) as MarketRow[];
     return rows.map(rowToMarket);
+  }
+
+  recordFactoryRun(run: {
+    feedId: number;
+    outcome: 'created' | 'skipped' | 'failed';
+    contractId?: string;
+    error?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO factory_runs (feed_id, outcome, contract_id, error, at)
+         VALUES (@feedId, @outcome, @contractId, @error, @at)`,
+      )
+      .run({
+        feedId: run.feedId,
+        outcome: run.outcome,
+        contractId: run.contractId ?? null,
+        error: run.error ?? null,
+        at: Date.now(),
+      });
+  }
+
+  getRecentFactoryRuns(limit = 100): {
+    id: number;
+    feedId: number;
+    outcome: string;
+    contractId: string | null;
+    error: string | null;
+    at: number;
+  }[] {
+    return this.db
+      .prepare(`SELECT * FROM factory_runs ORDER BY at DESC LIMIT ?`)
+      .all(limit) as any[];
+  }
+
+  getLastSuccessPerFeed(): { feedId: number; contractId: string; at: number }[] {
+    return this.db
+      .prepare(
+        `SELECT feed_id AS feedId, contract_id AS contractId, MAX(at) AS at
+         FROM factory_runs WHERE outcome = 'created' GROUP BY feed_id`,
+      )
+      .all() as any[];
+  }
+
+  onModuleDestroy(): void {
+    this.db.close();
   }
 }
 
