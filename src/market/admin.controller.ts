@@ -6,6 +6,7 @@ import { PerpetualRepository } from './perpetual.repository';
 import { EmailAuthRepository } from './email-auth.repository';
 import { AdminActivityRepository } from './admin-activity.repository';
 import { StellarService } from './stellar.service';
+import { OracleService } from './oracle.service';
 
 const DEFAULT_LIST_LIMIT = 50;
 
@@ -29,6 +30,7 @@ export class AdminController {
     private readonly emailWallets: EmailAuthRepository,
     private readonly activity: AdminActivityRepository,
     private readonly stellar: StellarService,
+    private readonly oracle: OracleService,
   ) {}
 
   @Get('overview')
@@ -45,7 +47,7 @@ export class AdminController {
     // Kept separate from `marketsByStatus` rather than merged into one
     // grouping — a perpetual's `WatchedPerpetualStatus` ('watching' |
     // 'terminated') isn't the same status space as a classic market's
-    // ('watching' | 'settling' | 'settled' | 'cancelling' | 'cancelled' |
+    // ('watching' | 'settled' | 'cancelled' |
     // 'pending'), so combining them would either collide 'watching'
     // across two different meanings or need namespacing either way — a
     // separate top-level field is the honest shape, matching this round's
@@ -97,6 +99,11 @@ export class AdminController {
         contractId,
         stroops: stroops.toString(),
       })),
+      // sampleSize counts ALL buy/sell rows, including those whose fee data
+      // was null and therefore skipped from the totals above.  This is
+      // intentional: the number tells the dashboard "this is how many trades
+      // the estimate is drawn from," and knowing a row existed but lacked fee
+      // data is itself useful signal (it shows the estimate may be low).
       sampleSize: rows.length,
     };
   }
@@ -142,13 +149,29 @@ export class AdminController {
     return { passkeyAddressesSeen: passkeyAddresses, emailWallets };
   }
 
+  /**
+   * Returns live Stellar network health merged with deployed contract addresses,
+   * WASM hashes, and oracle/deployer public keys — aggregated from StellarService
+   * and ConfigService so the dashboard has a single endpoint for infrastructure status.
+   */
   @Get('network')
   async network() {
     const health = await this.stellar.getNetworkHealth();
+    const nativeXlmSac = this.config.get<string>('nativeXlmSac');
+    let oracleXlmBalanceStroops: string | null = null;
+    let deployerXlmBalanceStroops: string | null = null;
+    if (nativeXlmSac) {
+      [oracleXlmBalanceStroops, deployerXlmBalanceStroops] = await Promise.all([
+        this.stellar.tokenBalance(nativeXlmSac, this.stellar.oraclePublicKey).then((b) => b.toString()).catch(() => null),
+        this.stellar.tokenBalance(nativeXlmSac, this.stellar.deployerPublicKey).then((b) => b.toString()).catch(() => null),
+      ]);
+    }
     return {
       ...health,
       oraclePublicKey: this.stellar.oraclePublicKey,
       deployerPublicKey: this.stellar.deployerPublicKey,
+      oracleXlmBalanceStroops,
+      deployerXlmBalanceStroops,
       contracts: {
         vaultContract: this.config.get<string>('vaultContract'),
         lazerContract: this.config.get<string>('lazerContract'),

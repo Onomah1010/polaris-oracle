@@ -36,6 +36,13 @@ export class MarketController {
     private readonly activity: AdminActivityRepository,
   ) {}
 
+  private validateId(id: string) {
+    if (id.length !== 56) {
+      throw new BadRequestException('id must be a 56‑character contract identifier');
+    }
+  }
+
+
   @Get()
   list(@Query('feedId') feedId?: string) {
     if (feedId === undefined) return this.markets.list();
@@ -46,6 +53,7 @@ export class MarketController {
 
   @Get(':id')
   get(@Param('id') id: string) {
+    this.validateId(id);
     const m = this.markets.get(id);
     if (!m) throw new NotFoundException(`no tracked market ${id}`);
     return m;
@@ -53,6 +61,7 @@ export class MarketController {
 
   @Get(':id/state')
   async state(@Param('id') id: string) {
+    this.validateId(id);
     // getMarketState already returns a fully normalized (camelCase,
     // stringified bigints, unwrapped status) object — see StellarService's
     // normalizeMarket for why the raw contract.Spec decode needs that step.
@@ -61,6 +70,7 @@ export class MarketController {
 
   @Get(':id/position')
   async position(@Param('id') id: string, @Query('address') address: string) {
+    this.validateId(id);
     if (!address) throw new BadRequestException('address query param is required');
     const [yes, no] = await this.stellar.getPosition(id, address);
     return { yes: yes.toString(), no: no.toString() };
@@ -76,6 +86,7 @@ export class MarketController {
    */
   @Get(':id/price')
   async price(@Param('id') id: string) {
+    this.validateId(id);
     const current = await this.stellar.getPrice(id);
     const windowSecs = this.config.get<number>('oddsChangeWindowSecs')!;
     const past = this.oddsSnapshots.closestBefore(id, Date.now() - windowSecs * 1000);
@@ -87,6 +98,7 @@ export class MarketController {
 
   @Get(':id/fee')
   async fee(@Param('id') id: string) {
+    this.validateId(id);
     return { feeBps: await this.stellar.getFee(id) };
   }
 
@@ -176,6 +188,7 @@ export class MarketController {
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async settle(@Param('id') id: string) {
+    this.validateId(id);
     await this.markets.triggerSettle(id);
     this.activity.recordAdminAction({ action: 'settle', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
@@ -185,6 +198,7 @@ export class MarketController {
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async cancel(@Param('id') id: string) {
+    this.validateId(id);
     await this.markets.triggerCancel(id);
     this.activity.recordAdminAction({ action: 'cancel', targetContractId: id, result: 'ok' });
     return this.markets.get(id);

@@ -1,32 +1,15 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Inject, Injectable } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { DATABASE } from './database.provider';
+import type { MarketRow } from './market-row.types';
 import type { WatchedMarket } from './market.types';
+import { runMigrations } from './schema-migrations';
 
-/**
- * Nest can't inject a bare `string` (or number/boolean) as a provider token
- * — DI tokens need identity, and primitives don't have any of their own, so
- * two `string`-typed bindings would collide. A dedicated Symbol gives the
- * DB path its own identity; tests bind it to `':memory:'`.
- */
-export const MARKETS_DB_PATH = Symbol('MARKETS_DB_PATH');
+export { MARKETS_DB_PATH } from './database.provider';
 
 @Injectable()
-export class MarketRepository implements OnModuleDestroy {
-  private readonly db: Database.Database;
-
-  constructor(
-    @Inject(MARKETS_DB_PATH) private readonly dbPath: string,
-    config: ConfigService,
-  ) {
-    const path = this.dbPath ?? config.get<string>('marketsDbFile') ?? './data/markets.db';
-    if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true });
-    }
-    this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
+export class MarketRepository {
+  constructor(@Inject(DATABASE) private readonly db: Database.Database) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS markets (
         contract_id TEXT PRIMARY KEY,
@@ -41,6 +24,7 @@ export class MarketRepository implements OnModuleDestroy {
         updated_at INTEGER NOT NULL
       );
     `);
+    runMigrations(this.db);
   }
 
   upsert(m: WatchedMarket): void {
@@ -49,6 +33,10 @@ export class MarketRepository implements OnModuleDestroy {
         `INSERT INTO markets (contract_id, strike_price_cents, expiry, grace_period_secs, feed_id, status, last_error, settle_tx_hash, created_at, updated_at)
          VALUES (@contractId, @strikePriceCents, @expiry, @gracePeriodSecs, @feedId, @status, @lastError, @settleTxHash, @createdAt, @updatedAt)
          ON CONFLICT(contract_id) DO UPDATE SET
+           strike_price_cents = excluded.strike_price_cents,
+           expiry = excluded.expiry,
+           grace_period_secs = excluded.grace_period_secs,
+           feed_id = excluded.feed_id,
            status = excluded.status,
            last_error = excluded.last_error,
            settle_tx_hash = excluded.settle_tx_hash,
@@ -62,30 +50,26 @@ export class MarketRepository implements OnModuleDestroy {
   }
 
   getAll(): WatchedMarket[] {
-    const rows = this.db.prepare(`SELECT * FROM markets ORDER BY created_at DESC`).all() as any[];
+    const rows = this.db.prepare(`SELECT * FROM markets ORDER BY created_at DESC`).all() as MarketRow[];
     return rows.map(rowToMarket);
   }
 
   getById(contractId: string): WatchedMarket | undefined {
     const row = this.db
       .prepare(`SELECT * FROM markets WHERE contract_id = ?`)
-      .get(contractId) as any;
+      .get(contractId) as MarketRow | undefined;
     return row ? rowToMarket(row) : undefined;
   }
 
   getByFeedId(feedId: number): WatchedMarket[] {
     const rows = this.db
       .prepare(`SELECT * FROM markets WHERE feed_id = ? ORDER BY created_at DESC`)
-      .all(feedId) as any[];
+      .all(feedId) as MarketRow[];
     return rows.map(rowToMarket);
-  }
-
-  onModuleDestroy(): void {
-    this.db.close();
   }
 }
 
-function rowToMarket(row: any): WatchedMarket {
+function rowToMarket(row: MarketRow): WatchedMarket {
   return {
     contractId: row.contract_id,
     strikePriceCents: row.strike_price_cents,

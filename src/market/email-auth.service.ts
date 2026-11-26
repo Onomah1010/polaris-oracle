@@ -19,6 +19,11 @@ interface SessionClaims {
   address: string;
 }
 
+/** Session JWTs are signed and verified with exactly this algorithm, issuer, and audience pinned — without pinning, `jwt.verify` accepts any algorithm/issuer/audience the token itself claims, which is how "alg: none" and cross-service token-confusion attacks happen. */
+const SESSION_JWT_ALGORITHM = 'HS256' as const;
+const SESSION_JWT_ISSUER = 'polaris-oracle';
+const SESSION_JWT_AUDIENCE = 'polaris-oracle-session';
+
 /**
  * Email fallback for the passkey-only login flow — see `polaris-frontend`'s
  * `wallet-provider.tsx` doc comment for why this exists: passkeys need a
@@ -46,6 +51,13 @@ export class EmailAuthService {
     @Inject(EMAIL_SENDER) private readonly sender: EmailSender,
   ) {}
 
+  /**
+   * Sends a one-time 6-digit OTP to `email` for sign-in. Enforces a per-email
+   * cooldown (config: `emailCodeResendCooldownSecs`) to prevent spam. The code
+   * is stored as a SHA-256 hash — never the plaintext — with a TTL set by
+   * `emailCodeTtlSecs`. Always resolves (void) so callers can't tell whether
+   * the address exists in the system.
+   */
   async requestCode(email: string): Promise<void> {
     const normalized = email.trim().toLowerCase();
     const existing = this.repo.getCode(normalized);
@@ -98,7 +110,11 @@ export class EmailAuthService {
   verifySession(token: string | undefined): SessionClaims | null {
     if (!token) return null;
     try {
-      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!) as SessionClaims;
+      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!, {
+        algorithms: [SESSION_JWT_ALGORITHM],
+        issuer: SESSION_JWT_ISSUER,
+        audience: SESSION_JWT_AUDIENCE,
+      }) as SessionClaims;
       return { email: claims.email, address: claims.address };
     } catch {
       return null;
@@ -112,7 +128,7 @@ export class EmailAuthService {
     functionName: string,
     args: WireArgs,
     contractKind?: ContractKind,
-  ): Promise<{ txHash: string; walletAddress: string }> {
+  ): Promise<{ txHash: string; walletAddress: string; status: 'success' | 'pending' }> {
     const walletRow = this.repo.getWallet(email);
     if (!walletRow) {
       throw new EmailAuthError('No wallet found for this session — sign in again.');
@@ -195,10 +211,19 @@ export class EmailAuthService {
     return address;
   }
 
+  /**
+   * Signs and returns a JWT session token encoding `{ email, address }`.
+   * TTL is set by config `sessionTtlSecs`; secret by `sessionJwtSecret`.
+   * This token is handed back to the client as a cookie and verified by
+   * `verifySession` on subsequent requests.
+   */
   private issueSessionToken(email: string, address: string): string {
     const ttlSecs = this.config.get<number>('sessionTtlSecs')!;
     return jwt.sign({ email, address } satisfies SessionClaims, this.config.get<string>('sessionJwtSecret')!, {
       expiresIn: ttlSecs,
+      algorithm: SESSION_JWT_ALGORITHM,
+      issuer: SESSION_JWT_ISSUER,
+      audience: SESSION_JWT_AUDIENCE,
     });
   }
 }

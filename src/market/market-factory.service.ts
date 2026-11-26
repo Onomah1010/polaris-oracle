@@ -42,6 +42,9 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
   // starting a create — checked+added synchronously with hasOpenMarket in
   // rollFeed, so there's no await between the check and the reservation.
   private readonly rolling = new Set<number>();
+  // Deployed markets whose watch() threw (e.g. SQLITE_BUSY): the contract is
+  // live and funded, so the next sweep re-tracks it instead of deploying another.
+  private readonly orphans = new Map<number, Parameters<MarketService['watch']>[0]>();
 
   constructor(
     private readonly repo: MarketRepository,
@@ -96,6 +99,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * timers.
    */
   async run(): Promise<MarketFactoryRunResult> {
+    await this.checkHotWalletBalances();
     const catalog = this.config.get<FeedCatalogEntry[]>('feedCatalog') ?? [];
     const result: MarketFactoryRunResult = { created: [], skipped: [], failed: [] };
 
@@ -127,6 +131,13 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     }
     this.rolling.add(entry.feedId);
     try {
+      const orphan = this.orphans.get(entry.feedId);
+      if (orphan) {
+        this.markets.watch(orphan);
+        this.orphans.delete(entry.feedId);
+        this.logger.warn(`re-tracked orphaned market ${orphan.contractId} for ${entry.symbol}`);
+        return { status: 'created', contractId: orphan.contractId, strikePriceCents: orphan.strikePriceCents };
+      }
       const { contractId, strikePriceCents } = await this.createMarketFor(entry);
       return { status: 'created', contractId, strikePriceCents: strikePriceCents.toString() };
     } catch (err) {
@@ -138,15 +149,18 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Looks up the catalog entry for a feed by its numeric ID; returns undefined if the feed is not in the configured catalog. */
   private catalogEntry(feedId: number): FeedCatalogEntry | undefined {
     const catalog = this.config.get<FeedCatalogEntry[]>('feedCatalog') ?? [];
     return catalog.find((e) => e.feedId === feedId);
   }
 
+  /** Returns true if any market for this feed is in a non-terminal state (watching or pending), preventing duplicate creation. */
   private hasOpenMarket(feedId: number): boolean {
     return this.repo.getByFeedId(feedId).some((m) => m.status === 'watching' || m.status === 'pending');
   }
 
+  /** Withdraws seed liquidity from the vault and deploys a new market contract for the given feed catalog entry. */
   private async createMarketFor(entry: FeedCatalogEntry): Promise<{ contractId: string; strikePriceCents: bigint }> {
     const vaultContract = this.config.get<string>('vaultContract');
     const lazerContract = this.config.get<string>('lazerContract');
@@ -158,9 +172,6 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
-    const now = Math.floor(Date.now() / 1000);
-    const expiry = now + this.config.get<number>('marketFactoryExpirySecs')!;
     const gracePeriodSecs = this.config.get<number>('marketFactoryGracePeriodSecs')!;
     const initialLiquidityStroops = BigInt(this.config.get<string>('marketFactoryInitialLiquidityStroops')!);
 
@@ -169,6 +180,11 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     // deployMarket never runs, so there's no partially-funded market left
     // behind. See the module doc: every entry fails independently.
     const withdrawTxHash = await this.stellar.vaultWithdraw(vaultContract, initialLiquidityStroops);
+
+    // Strike and expiry are taken right before deploy, after the withdraw
+    // round trip, so neither is stale by the time the market opens.
+    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
+    const expiry = Math.floor(Date.now() / 1000) + this.config.get<number>('marketFactoryExpirySecs')!;
 
     const { contractId } = await this.stellar.deployMarket({
       strikePriceCents,
@@ -190,13 +206,22 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       reflectorToleranceBps: this.config.get<number>('reflectorToleranceBps')!,
     });
 
-    this.markets.watch({
+    const watched = {
       contractId,
       strikePriceCents: strikePriceCents.toString(),
       expiry,
       gracePeriodSecs,
       feedId: entry.feedId,
-    });
+    };
+    try {
+      this.markets.watch(watched);
+    } catch (err) {
+      this.orphans.set(entry.feedId, watched);
+      this.logger.error(
+        `deployed market ${contractId} for feed ${entry.feedId} but watch() failed; will retry next sweep: ${(err as Error).message}`,
+      );
+      throw err;
+    }
 
     // Best-effort admin-dashboard logging, once the market that withdrawal
     // actually funded is known — see AdminActivityRepository's doc comment:
@@ -234,6 +259,31 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * (timeout, malformed response, missing catalog entry) still falls
    * through to this same path unchanged.
    */
+  /** Logs a warning when the oracle or deployer hot-wallet XLM balance is below the configured threshold. Called once per factory interval. Requires `nativeXlmSac` to be configured; silently skips otherwise. */
+  private async checkHotWalletBalances(): Promise<void> {
+    const nativeXlmSac = this.config.get<string>('nativeXlmSac');
+    if (!nativeXlmSac) return;
+    const minStroops = BigInt(this.config.get<string>('oracleMinBalanceStroops') ?? '50000000');
+    const wallets: { label: string; address: string }[] = [
+      { label: 'oracle', address: this.stellar.oraclePublicKey },
+      { label: 'deployer', address: this.stellar.deployerPublicKey },
+    ];
+    await Promise.allSettled(
+      wallets.map(async ({ label, address }) => {
+        try {
+          const balance = await this.stellar.tokenBalance(nativeXlmSac, address);
+          if (balance < minStroops) {
+            this.logger.warn(
+              `${label} hot-wallet XLM balance low: ${balance} stroops (threshold: ${minStroops}) — trades, settlement, and wallet deploys may fail`,
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`failed to read ${label} hot-wallet XLM balance: ${(err as Error).message}`);
+        }
+      }),
+    );
+  }
+
   private async fetchStrikePriceCents(entry: FeedCatalogEntry, reflectorContract: string): Promise<bigint> {
     const hermesUrl = this.config.get<string>('pythHermesUrl')!;
     try {
